@@ -1213,6 +1213,35 @@ static struct kpm_miscdevice      *p_ns_team_dev;
 /* -----------------------------------------------------------------------
  * KPM lifecycle
  * --------------------------------------------------------------------- */
+/* Locate unlocked_ioctl without depending on local function symbol names.
+ *
+ * Android 16+/CFI kernels append a per-build hash to local symbols, e.g.
+ * "chrdev_open$4083aaa7…" and "pipe_write$6c38da87…", so chrdev_open and
+ * fifo_open can never be resolved by name and the open-based probe above
+ * fails. Global symbols keep their plain names, so instead scan well-known
+ * fops structs for a globally-named ioctl handler that occupies the
+ * unlocked_ioctl slot:
+ *   ptmx_fops.unlocked_ioctl  = tty_ioctl
+ *   def_blk_fops.unlocked_ioctl = blkdev_ioctl
+ * Returns the byte offset of the slot, or -1 if it could not be determined. */
+static int probe_ioctl_offset_from_known_fops(void)
+{
+    static const char *const fops_names[]  = { "ptmx_fops", "def_blk_fops" };
+    static const char *const ioctl_names[] = { "tty_ioctl", "blkdev_ioctl" };
+
+    for (int f = 0; f < 2; f++) {
+        uint64_t *fops = (uint64_t *)kallsyms_lookup_name(fops_names[f]);
+        uint64_t  fn   = kallsyms_lookup_name(ioctl_names[f]);
+        if (!fops || !fn)
+            continue;
+        for (int slot = 2; slot < 40; slot++) {   /* skip owner/llseek */
+            if (fops[slot] == fn)
+                return slot * 8;
+        }
+    }
+    return -1;
+}
+
 static long ns_team_init(const char *args, const char *event, void *__user rsv)
 {
     if (!kallsyms_lookup_name) {
@@ -1401,8 +1430,16 @@ static long ns_team_init(const char *args, const char *event, void *__user rsv)
                                 : open_off - 0x20;
             fops_probed = 1;
         } else {
-            fops_ioctl_offset = 0x48; /* safe fallback for 4.14 */
-            printk(KERN_WARNING "ns_team: fops probe failed, defaulting ioctl=0x48\n");
+            int io_off = probe_ioctl_offset_from_known_fops();
+            if (io_off > 0) {
+                fops_ioctl_offset = io_off;
+                fops_probed = 1;
+                printk(KERN_INFO "ns_team: probed unlocked_ioctl=0x%x via known fops\n",
+                       io_off);
+            } else {
+                fops_ioctl_offset = 0x48; /* safe fallback for 4.14 */
+                printk(KERN_WARNING "ns_team: fops probe failed, defaulting ioctl=0x48\n");
+            }
         }
         fops_compat_offset = fops_ioctl_offset + 8;
     }
