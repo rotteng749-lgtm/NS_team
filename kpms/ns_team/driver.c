@@ -919,6 +919,8 @@ static int is_touchscreen_name(const char *name)
         "touch", "synaptics", "goodix", "sec_touch", "focaltech",
         "novatek", "himax", "elan", "atmel", "stm_ts", "fts",
         "_ts", "ts_", "digitizer",
+        /* MediaTek touch-panel driver (e.g. "mtk-tpd") and its variants. */
+        "tpd", "mtk-ts",
     };
     for (size_t i = 0; i < sizeof(hints) / sizeof(hints[0]); i++) {
         if (kpm_strcasestr(name, hints[i]))
