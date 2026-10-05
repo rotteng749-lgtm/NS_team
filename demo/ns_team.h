@@ -229,7 +229,7 @@ private:
 			return NULL;
 		}
 
-		const char *files[] = { "wanbai", "CheckMe", "Ckanri", "lanran","video188"};
+		const char *files[] = { "ns_team", "wanbai", "CheckMe", "Ckanri", "lanran", "video188" };
 		struct dirent *entry;
 		char *file_path = NULL;
 		while ((entry = readdir(dir)) != NULL) {
@@ -241,7 +241,8 @@ private:
 			size_t path_length = strlen(dev_path) + strlen(entry->d_name) + 2;
 			file_path = (char *)malloc(path_length);
 			snprintf(file_path, path_length, "%s/%s", dev_path, entry->d_name);
-			for (int i = 0; i < 5; i++) {
+			const int n_files = (int)(sizeof(files) / sizeof(files[0]));
+			for (int i = 0; i < n_files; i++) {
 				if (strcmp(entry->d_name, files[i]) == 0) {
 					printf("Driver file: %s\n", file_path);
 					closedir(dir);

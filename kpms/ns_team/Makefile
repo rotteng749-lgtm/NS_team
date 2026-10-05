@@ -18,9 +18,9 @@ INCLUDE_FLAGS := $(foreach dir,$(INCLUDE_DIRS),-I$(KP_DIR)/kernel/$(dir))
 
 objs := driver.o
 
-all: wanbai.kpm
+all: ns_team.kpm
 
-wanbai.kpm: $(objs)
+ns_team.kpm: $(objs)
 	$(CC) -r -o $@ $^
 
 %.o: %.c

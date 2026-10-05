@@ -1,7 +1,15 @@
-curl -o arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
-          tar -Jxf arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+# One-time setup: fetch the aarch64 bare-metal toolchain used to build the KPM.
 
-cd kpms/pubg_driver
-export TARGET_COMPILE=/home/alex/workspace/cheat-related-stuff/my-projects/kernel-based-cheat/jni/kernel-driver/KPatch-Next/compiler/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-
-export KP_DIR=../..
-make clean && make 2>&1 && echo "=== UND ===" && ../../compiler/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-readelf -s wanbai.kpm | grep "UND"
+curl -L -o arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz \
+  https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+
+tar -Jxf arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+mkdir -p compiler
+mv arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf compiler/
+
+# Then build the NS_team KPM (the toolchain in ./compiler is auto-detected):
+./build-kpm.sh ns_team
+
+# Inspect the produced module and list unresolved symbols:
+../../compiler/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-readelf \
+  -s kpms/ns_team/ns_team.kpm | grep "UND"

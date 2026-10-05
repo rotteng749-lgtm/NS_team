@@ -1,0 +1,33 @@
+name: Build KPM
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ns_team.kpm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download ARM bare-metal toolchain
+        run: |
+          curl -fsSL -o tc.tar.xz \
+            https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+          mkdir -p compiler
+          tar -xJf tc.tar.xz -C compiler
+          rm -f tc.tar.xz
+
+      - name: Build KPM
+        run: ./build-kpm.sh ns_team
+
+      - name: Upload ns_team.kpm
+        uses: actions/upload-artifact@v4
+        with:
+          name: ns_team-kpm
+          path: kpms/ns_team/ns_team.kpm
+          if-no-files-found: error

@@ -1,8 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * wanbai – KPatch-Next KPM kernel driver
+ * ns_team – KPatch-Next KPM kernel driver
  *
- * ioctl interface matching wanbai.h:
+ * Rebranded and maintained by NS_team. Derived from the KPatch-Next
+ * framework (https://github.com/bmax121/KPatch-Next) and the original
+ * wanbai-driver by ALEX5402; distributed under GPL-2.0-or-later.
+ *
+ * ioctl interface matching ns_team.h:
  *   OP_INIT_KEY    (0x800)
  *   OP_READ_MEM    (0x801)
  *   OP_WRITE_MEM   (0x802)
@@ -18,11 +22,13 @@
 #include <ktypes.h>
 #include <linux/printk.h>
 
-KPM_NAME("universal-ioctl-driver");
+KPM_NAME("ns_team");
 KPM_VERSION("3.0.3");
-KPM_LICENSE("ALL RIGHTS RESERVED BY ALEX5402");
-KPM_AUTHOR("@alex5402");
-KPM_DESCRIPTION("Universal ioctl driver supports Gt driver, dit-driver, dit pro driver,  wanbai driver, LDG kpm driver, for 4.4 to all latest kernels (/dev/wanbai) for support visit t.me/alex5402");
+KPM_LICENSE("GPL-2.0-or-later");
+KPM_AUTHOR("NS_team");
+KPM_DESCRIPTION("NS_team universal ioctl driver (/dev/ns_team): cross-process "
+                "memory read/write, module base lookup and touch event "
+                "injection for Android kernels 4.4+");
 
 #define OP_INIT_KEY     0x800
 #define OP_READ_MEM     0x801
@@ -31,7 +37,7 @@ KPM_DESCRIPTION("Universal ioctl driver supports Gt driver, dit-driver, dit pro 
 #define OP_GET_PID      0x804
 #define OP_TOUCH_INIT   0x805
 #define OP_TOUCH_EVENT  0x806
-#define OP_CALLFUNC_1   0x900 /* Matches wanbai.h tscape_input(__CALLFUNC_1) */
+#define OP_CALLFUNC_1   0x900 /* Matches ns_team.h tscape_input(__CALLFUNC_1) */
 
 /* Linux input event types and codes */
 #define KPM_EV_SYN              0x00
@@ -335,13 +341,13 @@ static int probe_mm_mmap_offset(struct mm_struct *mm)
             if (kp_safe_read(&vmm, (void *)(candidate + vmm_off), sizeof(vmm)))
                 continue;
             if (vmm == mm_val) {
-                printk(KERN_INFO "wanbai: probed mm->mmap offset=0x%x (vma=%llx vm_start=%llx)\n",
+                printk(KERN_INFO "ns_team: probed mm->mmap offset=0x%x (vma=%llx vm_start=%llx)\n",
                        off, candidate, vm_start);
                 return off;
             }
         }
     }
-    printk(KERN_ERR "wanbai: failed to probe mm->mmap offset, trying default 0x0\n");
+    printk(KERN_ERR "ns_team: failed to probe mm->mmap offset, trying default 0x0\n");
     return 0;  /* fallback */
 }
 
@@ -396,12 +402,12 @@ static int probe_vm_next_offset(struct vm_area_struct *vma, struct mm_struct *mm
             if (kp_safe_read(&vmm, (void *)(next + vmm_off), sizeof(vmm)))
                 continue;
             if (vmm == mm_val) {
-                printk(KERN_INFO "wanbai: probed vm_next offset=0x%x\n", off);
+                printk(KERN_INFO "ns_team: probed vm_next offset=0x%x\n", off);
                 return off;
             }
         }
     }
-    printk(KERN_INFO "wanbai: vm_next probe failed, using default 0x10\n");
+    printk(KERN_INFO "ns_team: vm_next probe failed, using default 0x10\n");
     return 0x10;  /* default */
 }
 
@@ -588,7 +594,7 @@ static uint64_t module_base_vma(int32_t pid, const char *name)
 
     /* We MUST use safe reads (nofault) because we don't hold mmap_lock. */
     if (!kp_probe_kernel_read && !kp_copy_from_kernel_nofault) {
-        printk(KERN_ERR "wanbai: VMA walk missing safe read functions!\n");
+        printk(KERN_ERR "ns_team: VMA walk missing safe read functions!\n");
         kp_mmput(mm);
         return 0;
     }
@@ -601,7 +607,7 @@ static uint64_t module_base_vma(int32_t pid, const char *name)
     /* Safely read mm->mmap */
     struct vm_area_struct *vma = NULL;
     if (kp_safe_read(&vma, (char *)mm + mm_mmap_offset, sizeof(vma)) || !vma) {
-        printk(KERN_ERR "wanbai: mm->mmap read failed at offset 0x%x\n", mm_mmap_offset);
+        printk(KERN_ERR "ns_team: mm->mmap read failed at offset 0x%x\n", mm_mmap_offset);
         kp_mmput(mm);
         return 0;
     }
@@ -610,7 +616,7 @@ static uint64_t module_base_vma(int32_t pid, const char *name)
     if (!vma_vm_file_off) {
         vma_vm_file_off = probe_vm_file_offset(vma, mm);
         vma_vm_next_off = probe_vm_next_offset(vma, mm);
-        printk(KERN_INFO "wanbai: VMA offsets: mm_mmap=0x%x vm_file=0x%x vm_next=0x%x\n",
+        printk(KERN_INFO "ns_team: VMA offsets: mm_mmap=0x%x vm_file=0x%x vm_next=0x%x\n",
                mm_mmap_offset, vma_vm_file_off, vma_vm_next_off);
     }
 
@@ -628,7 +634,7 @@ static uint64_t module_base_vma(int32_t pid, const char *name)
             const char *fname = dentry_name_from_file(filp, fname_buf, sizeof(fname_buf));
 #if DEBUG_VMA_WALK
             if (count <= 10) {
-                printk(KERN_INFO "wanbai: VMA[%d] start=%llx filp=%px fname='%s'\n",
+                printk(KERN_INFO "ns_team: VMA[%d] start=%llx filp=%px fname='%s'\n",
                        count, *(uint64_t *)&vma, filp, fname ? fname : "(null)");
             }
 #endif
@@ -646,8 +652,6 @@ static uint64_t module_base_vma(int32_t pid, const char *name)
         vma = (struct vm_area_struct *)next;
     }
 
-    if (!base) {
-    }
     kp_mmput(mm);
     return base;
 }
@@ -667,7 +671,7 @@ static uint64_t module_base(int32_t pid, const char *name)
 
     /* Method 2: /proc/maps reading (works on 4.x kernels with set_fs) */
     if (!kp_snprintf || !kp_filp_open || !kp_filp_close) {
-        printk(KERN_ERR "wanbai: module_base: no file I/O funcs available\n");
+        printk(KERN_ERR "ns_team: module_base: no file I/O funcs available\n");
         return 0;
     }
 
@@ -676,7 +680,7 @@ static uint64_t module_base(int32_t pid, const char *name)
 
     struct file *f = kp_filp_open(path, 0, 0);
     if (IS_ERR(f)) {
-        printk(KERN_ERR "wanbai: failed to open %s err=%ld\n", path, (long)(f));
+        printk(KERN_ERR "ns_team: failed to open %s err=%ld\n", path, (long)(f));
         return 0;
     }
 
@@ -750,11 +754,11 @@ static void probe_task_comm_offset(void)
             init_task[off+4] == 'p' && init_task[off+5] == 'e' &&
             init_task[off+6] == 'r') {
             task_comm_offset = off;
-            printk(KERN_INFO "wanbai: probed task_struct.comm offset=0x%x\n", off);
+            printk(KERN_INFO "ns_team: probed task_struct.comm offset=0x%x\n", off);
             return;
         }
     }
-    printk(KERN_WARNING "wanbai: task_struct.comm offset probe failed\n");
+    printk(KERN_WARNING "ns_team: task_struct.comm offset probe failed\n");
 }
 
 static int32_t find_pid_by_name(const char *target_name)
@@ -833,7 +837,7 @@ static struct input_dev *find_touchscreen_dev(const char *preferred_name)
 
     struct list_head *dev_list = (struct list_head *)kallsyms_lookup_name("input_dev_list");
     if (!dev_list || !dev_list->next || dev_list->next == dev_list) {
-        printk(KERN_WARNING "wanbai: input_dev_list empty or not found\n");
+        printk(KERN_WARNING "ns_team: input_dev_list empty or not found\n");
         return NULL;
     }
 
@@ -871,14 +875,14 @@ static struct input_dev *find_touchscreen_dev(const char *preferred_name)
                 /* Check if this device matches touchscreen heuristics */
                 if (preferred_name && preferred_name[0] && kpm_strcasestr(dev_name, preferred_name)) {
                     found = (struct input_dev *)candidate_dev;
-                    printk(KERN_INFO "wanbai: found requested input device: '%s' at %px\n", dev_name, found);
+                    printk(KERN_INFO "ns_team: found requested input device: '%s' at %px\n", dev_name, found);
                     break;
                 }
                 if (kpm_strcasestr(dev_name, "touch") || kpm_strcasestr(dev_name, "ts") ||
                     kpm_strcasestr(dev_name, "synaptics") || kpm_strcasestr(dev_name, "goodix") ||
                     kpm_strcasestr(dev_name, "fts") || kpm_strcasestr(dev_name, "sec_touch")) {
                     fallback_touch = (struct input_dev *)candidate_dev;
-                    printk(KERN_INFO "wanbai: detected touchscreen device: '%s' at %px\n", dev_name, fallback_touch);
+                    printk(KERN_INFO "ns_team: detected touchscreen device: '%s' at %px\n", dev_name, fallback_touch);
                 }
             }
 
@@ -914,7 +918,7 @@ static int inject_touch_event(int type, int code, int value)
         dev = find_touchscreen_dev(NULL);
 
     if (!dev) {
-        printk(KERN_ERR "wanbai: inject_touch_event: no touchscreen device found\n");
+        printk(KERN_ERR "ns_team: inject_touch_event: no touchscreen device found\n");
         return -19; /* -ENODEV */
     }
 
@@ -925,14 +929,14 @@ static int inject_touch_event(int type, int code, int value)
 /* -----------------------------------------------------------------------
  * ioctl handler
  * --------------------------------------------------------------------- */
-static long wanbai_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+static long ns_team_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     switch (cmd) {
     case OP_INIT_KEY: {
         char key[0x100];
         long ret = kp_copy_from_user(key, (void *)arg, sizeof(key));
         if (ret) {
-            printk(KERN_ERR "wanbai: OP_INIT_KEY copy_from_user failed: %ld\n", ret);
+            printk(KERN_ERR "ns_team: OP_INIT_KEY copy_from_user failed: %ld\n", ret);
             return -14;
         }
         return 0;
@@ -1004,7 +1008,7 @@ static long wanbai_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         char raw_buf[288];
         long cfu = kp_copy_from_user(raw_buf, (void *)arg, sizeof(raw_buf));
         if (cfu) {
-            printk(KERN_ERR "wanbai: OP_GET_PID copy_from_user failed: %ld\n", cfu);
+            printk(KERN_ERR "ns_team: OP_GET_PID copy_from_user failed: %ld\n", cfu);
             return -14;
         }
 
@@ -1052,19 +1056,19 @@ static long wanbai_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         }
 
         if (target_name[0] == '\0') {
-            printk(KERN_ERR "wanbai: OP_GET_PID: unable to parse target process name from userspace buffer\n");
+            printk(KERN_ERR "ns_team: OP_GET_PID: unable to parse target process name from userspace buffer\n");
             return -22;
         }
 
-        printk(KERN_INFO "wanbai: OP_GET_PID looking up process: '%s'\n", target_name);
+        printk(KERN_INFO "ns_team: OP_GET_PID looking up process: '%s'\n", target_name);
 
         int32_t found_pid = find_pid_by_name(target_name);
         if (found_pid <= 0) {
-            printk(KERN_WARNING "wanbai: OP_GET_PID process '%s' NOT FOUND\n", target_name);
+            printk(KERN_WARNING "ns_team: OP_GET_PID process '%s' NOT FOUND\n", target_name);
             return -3;
         }
 
-        printk(KERN_INFO "wanbai: OP_GET_PID process '%s' FOUND => pid=%d\n", target_name, found_pid);
+        printk(KERN_INFO "ns_team: OP_GET_PID process '%s' FOUND => pid=%d\n", target_name, found_pid);
 
         /* Write PID back into common response offsets (0, 8, 256) */
         *(int32_t *)raw_buf = found_pid;
@@ -1073,7 +1077,7 @@ static long wanbai_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
         long ctu = kp_copy_to_user((void *)arg, raw_buf, sizeof(raw_buf));
         if (ctu) {
-            printk(KERN_ERR "wanbai: OP_GET_PID copy_to_user failed: %ld\n", ctu);
+            printk(KERN_ERR "ns_team: OP_GET_PID copy_to_user failed: %ld\n", ctu);
             return -14;
         }
 
@@ -1108,16 +1112,16 @@ static long wanbai_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
  * Device node pointers (dynamically allocated to avoid ABI overflows
  * and Read-Only .data permission panics on some kernels)
  * --------------------------------------------------------------------- */
-static void      *p_wanbai_fops;   /* raw buffer, not a typed struct */
-static struct kpm_miscdevice      *p_wanbai_dev;
+static void      *p_ns_team_fops;   /* raw buffer, not a typed struct */
+static struct kpm_miscdevice      *p_ns_team_dev;
 
 /* -----------------------------------------------------------------------
  * KPM lifecycle
  * --------------------------------------------------------------------- */
-static long wanbai_init(const char *args, const char *event, void *__user rsv)
+static long ns_team_init(const char *args, const char *event, void *__user rsv)
 {
     if (!kallsyms_lookup_name) {
-        printk(KERN_ERR "wanbai: kallsyms_lookup_name unavailable\n");
+        printk(KERN_ERR "ns_team: kallsyms_lookup_name unavailable\n");
         return -2;
     }
 
@@ -1125,7 +1129,7 @@ static long wanbai_init(const char *args, const char *event, void *__user rsv)
 
 #define RESOLVE(var, sym) \
     var = (typeof(var))kallsyms_lookup_name(sym); \
-    if (!var) { printk(KERN_ERR "wanbai: missing: " sym "\n"); missing++; }
+    if (!var) { printk(KERN_ERR "ns_team: missing: " sym "\n"); missing++; }
 
     RESOLVE(kp_find_get_pid,    "find_get_pid");
     kp_pid_task = (t_pid_task)kallsyms_lookup_name("pid_task");
@@ -1156,19 +1160,19 @@ static long wanbai_init(const char *args, const char *event, void *__user rsv)
     /* __kmalloc was renamed to __kmalloc_noprof in kernel 6.10+ (alloc_tag profiling) */
     kp_kmalloc = (t_kmalloc)kallsyms_lookup_name("__kmalloc");
     if (!kp_kmalloc) kp_kmalloc = (t_kmalloc)kallsyms_lookup_name("__kmalloc_noprof");
-    if (!kp_kmalloc) { printk(KERN_ERR "wanbai: missing: __kmalloc / __kmalloc_noprof\n"); missing++; }
+    if (!kp_kmalloc) { printk(KERN_ERR "ns_team: missing: __kmalloc / __kmalloc_noprof\n"); missing++; }
 
     RESOLVE(kp_kfree,           "kfree");
 
     /* get_zeroed_page was renamed to get_zeroed_page_noprof in kernel 6.10+ */
     kp_get_zeroed_page = (t_get_zeroed_page)kallsyms_lookup_name("get_zeroed_page");
     if (!kp_get_zeroed_page) kp_get_zeroed_page = (t_get_zeroed_page)kallsyms_lookup_name("get_zeroed_page_noprof");
-    if (!kp_get_zeroed_page) { printk(KERN_ERR "wanbai: missing: get_zeroed_page / get_zeroed_page_noprof\n"); missing++; }
+    if (!kp_get_zeroed_page) { printk(KERN_ERR "ns_team: missing: get_zeroed_page / get_zeroed_page_noprof\n"); missing++; }
 
     /* free_pages was renamed to free_pages_noprof in kernel 6.10+ */
     kp_free_pages = (t_free_pages)kallsyms_lookup_name("free_pages");
     if (!kp_free_pages) kp_free_pages = (t_free_pages)kallsyms_lookup_name("free_pages_noprof");
-    if (!kp_free_pages) { printk(KERN_ERR "wanbai: missing: free_pages / free_pages_noprof\n"); missing++; }
+    if (!kp_free_pages) { printk(KERN_ERR "ns_team: missing: free_pages / free_pages_noprof\n"); missing++; }
 
     kp_snprintf = (t_snprintf)kallsyms_lookup_name("snprintf");
     kp_filp_open = (t_filp_open)kallsyms_lookup_name("filp_open");
@@ -1184,11 +1188,11 @@ static long wanbai_init(const char *args, const char *event, void *__user rsv)
      * few bytes but returns 0). __arch_copy uses LDTR which bypasses PAN. */
     kp_raw_copy_from_user = (t_copy_from_user)kallsyms_lookup_name("__arch_copy_from_user");
     if (kp_raw_copy_from_user) {
-        printk(KERN_INFO "wanbai: using __arch_copy_from_user\n");
+        printk(KERN_INFO "ns_team: using __arch_copy_from_user\n");
     } else {
         kp_raw_copy_from_user = (t_copy_from_user)kallsyms_lookup_name("_copy_from_user");
         if (kp_raw_copy_from_user)
-            printk(KERN_INFO "wanbai: using _copy_from_user (fallback)\n");
+            printk(KERN_INFO "ns_team: using _copy_from_user (fallback)\n");
     }
 
     kp_raw_copy_to_user = (t_copy_from_user)kallsyms_lookup_name("__arch_copy_to_user");
@@ -1199,24 +1203,24 @@ static long wanbai_init(const char *args, const char *event, void *__user rsv)
     kp_strncpy_from_user = (t_strncpy_from_user)kallsyms_lookup_name("strncpy_from_user");
 
     if (!kp_raw_copy_from_user || !kp_raw_copy_to_user) {
-        printk(KERN_ERR "wanbai: missing: [__arch]_copy_from_user\n");
+        printk(KERN_ERR "ns_team: missing: [__arch]_copy_from_user\n");
         missing++;
     }
 
     if (!kp_strncpy_from_user) {
-        printk(KERN_ERR "wanbai: missing: strncpy_from_user\n");
+        printk(KERN_ERR "ns_team: missing: strncpy_from_user\n");
         missing++;
     }
 
     if (missing > 0) {
-        printk(KERN_ERR "wanbai: %d symbols missing, aborting\n", missing);
+        printk(KERN_ERR "ns_team: %d symbols missing, aborting\n", missing);
         return -2;
     }
 
     /* Probe task_struct.comm offset from init_task */
     probe_task_comm_offset();
 
-    printk(KERN_INFO "wanbai: symbols OK\n");
+    printk(KERN_INFO "ns_team: symbols OK\n");
 
     /* ------------------------------------------------------------------
      * Detect correct FOLL_FORCE value.
@@ -1236,11 +1240,11 @@ static long wanbai_init(const char *args, const char *event, void *__user rsv)
     if (kallsyms_lookup_name("__kmalloc_noprof") ||
         kallsyms_lookup_name("folio_alloc_noprof")) {
         kp_foll_force = FOLL_FORCE_NEW;  /* 0x08, kernel >= 6.3 */
-        printk(KERN_INFO "wanbai: detected kernel >= 6.3, FOLL_FORCE=0x%x\n",
+        printk(KERN_INFO "ns_team: detected kernel >= 6.3, FOLL_FORCE=0x%x\n",
                kp_foll_force);
     } else {
         kp_foll_force = FOLL_FORCE_OLD;  /* 0x10, kernel <= 6.2 */
-        printk(KERN_INFO "wanbai: detected kernel <= 6.2, FOLL_FORCE=0x%x\n",
+        printk(KERN_INFO "ns_team: detected kernel <= 6.2, FOLL_FORCE=0x%x\n",
                kp_foll_force);
     }
 
@@ -1307,32 +1311,32 @@ static long wanbai_init(const char *args, const char *event, void *__user rsv)
                                 : open_off - 0x20;
         } else {
             fops_ioctl_offset = 0x48; /* safe fallback for 4.14 */
-            printk(KERN_WARNING "wanbai: fops probe failed, defaulting ioctl=0x48\n");
+            printk(KERN_WARNING "ns_team: fops probe failed, defaulting ioctl=0x48\n");
         }
         fops_compat_offset = fops_ioctl_offset + 8;
     }
 
     /* Allocate 4096 bytes each to guarantee ABI overflow margin */
-    p_wanbai_fops = kp_kmalloc(4096, GFP_KERNEL);
-    p_wanbai_dev  = kp_kmalloc(4096, GFP_KERNEL);
+    p_ns_team_fops = kp_kmalloc(4096, GFP_KERNEL);
+    p_ns_team_dev  = kp_kmalloc(4096, GFP_KERNEL);
 
-    if (!p_wanbai_fops || !p_wanbai_dev) {
-        printk(KERN_ERR "wanbai: kmalloc failed\n");
-        if (p_wanbai_fops) kp_kfree(p_wanbai_fops);
-        if (p_wanbai_dev)  kp_kfree(p_wanbai_dev);
+    if (!p_ns_team_fops || !p_ns_team_dev) {
+        printk(KERN_ERR "ns_team: kmalloc failed\n");
+        if (p_ns_team_fops) kp_kfree(p_ns_team_fops);
+        if (p_ns_team_dev)  kp_kfree(p_ns_team_dev);
         return -12; /* ENOMEM */
     }
 
     /* Zero out unconditionally (memset equivalent) */
-    char *p1 = (char *)p_wanbai_fops;
-    char *p2 = (char *)p_wanbai_dev;
+    char *p1 = (char *)p_ns_team_fops;
+    char *p2 = (char *)p_ns_team_dev;
     for (int i = 0; i < 4096; i++) { p1[i] = 0; p2[i] = 0; }
 
     /* Write ioctl function pointers at ALL possible offsets.
      * On different kernels, unlocked_ioctl can be at 0x38..0x58.
      * compat_ioctl is always unlocked_ioctl + 0x08.
      * Writing to multiple offsets is safe because unused slots (like poll,
-     * iterate_shared) being set to wanbai_ioctl just means those syscalls
+     * iterate_shared) being set to ns_team_ioctl just means those syscalls
      * call our handler which returns -EINVAL for unknown cmds.
      * Known layouts (arm64):
      *   4.9-4.14:  ioctl=0x38 (no iopoll, iterate_shared before 4.7 varies)
@@ -1343,43 +1347,43 @@ static long wanbai_init(const char *args, const char *event, void *__user rsv)
     int n_offsets = sizeof(ioctl_offsets) / sizeof(ioctl_offsets[0]);
     for (int i = 0; i < n_offsets; i++) {
         int off = ioctl_offsets[i];
-        *(uint64_t *)(p1 + off) = (uint64_t)wanbai_ioctl;
+        *(uint64_t *)(p1 + off) = (uint64_t)ns_team_ioctl;
     }
-    printk(KERN_INFO "wanbai: ioctl handler installed at offsets 0x38-0x58 (probed=0x%x)\n",
+    printk(KERN_INFO "ns_team: ioctl handler installed at offsets 0x38-0x58 (probed=0x%x)\n",
            fops_ioctl_offset);
 
     /* Set up miscdevice */
-    p_wanbai_dev->minor = MISC_DYNAMIC_MINOR;
-    p_wanbai_dev->name  = "wanbai";
-    p_wanbai_dev->fops  = p_wanbai_fops;
-    p_wanbai_dev->mode  = 0600;
+    p_ns_team_dev->minor = MISC_DYNAMIC_MINOR;
+    p_ns_team_dev->name  = "ns_team";
+    p_ns_team_dev->fops  = p_ns_team_fops;
+    p_ns_team_dev->mode  = 0600;
 
-    int ret = kp_misc_register(p_wanbai_dev);
+    int ret = kp_misc_register(p_ns_team_dev);
     if (ret) {
-        printk(KERN_ERR "wanbai: misc_register failed: %d\n", ret);
-        kp_kfree(p_wanbai_fops);
-        kp_kfree(p_wanbai_dev);
-        p_wanbai_fops = 0;
-        p_wanbai_dev = 0;
+        printk(KERN_ERR "ns_team: misc_register failed: %d\n", ret);
+        kp_kfree(p_ns_team_fops);
+        kp_kfree(p_ns_team_dev);
+        p_ns_team_fops = 0;
+        p_ns_team_dev = 0;
     }
     return ret;
 }
 
-static long wanbai_exit(void *__user rsv)
+static long ns_team_exit(void *__user rsv)
 {
-    if (kp_misc_deregister && p_wanbai_dev) {
-        kp_misc_deregister(p_wanbai_dev);
+    if (kp_misc_deregister && p_ns_team_dev) {
+        kp_misc_deregister(p_ns_team_dev);
     }
-    if (p_wanbai_dev)  { kp_kfree(p_wanbai_dev);  p_wanbai_dev = 0; }
-    if (p_wanbai_fops) { kp_kfree(p_wanbai_fops); p_wanbai_fops = 0; }
+    if (p_ns_team_dev)  { kp_kfree(p_ns_team_dev);  p_ns_team_dev = 0; }
+    if (p_ns_team_fops) { kp_kfree(p_ns_team_fops); p_ns_team_fops = 0; }
 
     return 0;
 }
 
-static long wanbai_ctl0(const char *args, char *__user out, int outlen) { return 0; }
-static long wanbai_ctl1(void *a1, void *a2, void *a3) { return 0; }
+static long ns_team_ctl0(const char *args, char *__user out, int outlen) { return 0; }
+static long ns_team_ctl1(void *a1, void *a2, void *a3) { return 0; }
 
-KPM_INIT(wanbai_init);
-KPM_EXIT(wanbai_exit);
-KPM_CTL0(wanbai_ctl0);
-KPM_CTL1(wanbai_ctl1);
+KPM_INIT(ns_team_init);
+KPM_EXIT(ns_team_exit);
+KPM_CTL0(ns_team_ctl0);
+KPM_CTL1(ns_team_ctl1);
