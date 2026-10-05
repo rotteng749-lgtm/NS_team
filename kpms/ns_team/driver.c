@@ -118,6 +118,7 @@ struct device;
  * --------------------------------------------------------------------- */
 static int fops_ioctl_offset;   /* detected at init */
 static int fops_compat_offset;  /* ioctl_offset + 8 */
+static int fops_probed;         /* 1 if the file_operations layout probe succeeded */
 
 /* miscdevice ABI layout for arm64 Linux 4.x–6.x */
 struct kpm_miscdevice {
@@ -155,11 +156,7 @@ typedef int                   (*t_misc_register)(struct kpm_miscdevice *);
 typedef void                  (*t_misc_deregister)(struct kpm_miscdevice *);
 typedef void                 *(*t_kmalloc)(uint64_t, uint32_t);
 typedef void                  (*t_kfree)(const void *);
-typedef uint64_t              (*t_get_zeroed_page)(uint32_t);
-typedef void                  (*t_free_pages)(uint64_t, uint32_t);
 typedef char                 *(*t_d_path)(const struct path *, char *, int);
-typedef int                   (*t_down_read)(void *);
-typedef void                  (*t_up_read)(void *);
 typedef long                  (*t_copy_from_user)(void *, const void *, uint64_t);
 
 static t_find_get_pid     kp_find_get_pid;
@@ -177,11 +174,14 @@ static t_misc_register    kp_misc_register;
 static t_misc_deregister  kp_misc_deregister;
 static t_kmalloc          kp_kmalloc;
 static t_kfree            kp_kfree;
-static t_get_zeroed_page  kp_get_zeroed_page;
-static t_free_pages       kp_free_pages;
 static t_copy_from_user   kp_raw_copy_from_user;  /* Resolved function pointer */
 static t_copy_from_user   kp_raw_copy_to_user;    /* Resolved function pointer */
-static int                kp_using_arch_copy = 0; /* 1 if using __arch_copy (needs PAN toggle) */
+/* Tracked per direction: __arch_copy_* is the raw LDTR copier and requires
+ * PSTATE.PAN to be cleared around the call, while _copy_* handles PAN itself.
+ * A single shared flag is wrong because a kernel can expose
+ * __arch_copy_from_user but only _copy_to_user (or the reverse). */
+static int                kp_arch_copy_from = 0;
+static int                kp_arch_copy_to   = 0;
 typedef long (*t_strncpy_from_user)(char *, const char *, long);
 static t_strncpy_from_user kp_strncpy_from_user;
 
@@ -214,7 +214,7 @@ static inline void kpm_rcu_read_unlock(void)
 static inline long kp_copy_from_user(void *to, const void *from, uint64_t n)
 {
     long ret;
-    if (kp_using_arch_copy) {
+    if (kp_arch_copy_from) {
         /* Disable PAN: set PSTATE.PAN = 0
          * 0xd500409f = MSR PAN, #0  (encoded directly for assembler compat) */
         asm volatile(".inst 0xd500409f" ::: "memory");
@@ -230,7 +230,7 @@ static inline long kp_copy_from_user(void *to, const void *from, uint64_t n)
 static inline long kp_copy_to_user(void *to, const void *from, uint64_t n)
 {
     long ret;
-    if (kp_using_arch_copy) {
+    if (kp_arch_copy_to) {
         asm volatile(".inst 0xd500409f" ::: "memory"); /* MSR PAN, #0 */
         ret = kp_raw_copy_to_user(to, from, n);
         asm volatile(".inst 0xd500419f" ::: "memory"); /* MSR PAN, #1 */
@@ -494,31 +494,50 @@ static long xmem(int32_t pid, uint64_t addr, void *buf, uint64_t sz, int wr)
     struct mm_struct *mm = get_mm_by_pid(pid);
     if (!mm) return -3;
 
-    /* Do NOT pass FOLL_FORCE — its value changed between kernel versions:
-     *   <= 6.2: 0x10,  >= 6.3: 0x08
-     * Passing the wrong value sets FOLL_NOWAIT causing 0-byte returns.
-     * For reading/writing normal process memory, FOLL_FORCE is not needed. */
-    unsigned int flags = wr ? FOLL_WRITE : 0;
-    int done = 0;
+    /* FOLL_FORCE is required: without it access_remote_vm refuses to fault in
+     * pages and cannot write to read-only/COW mappings. Its numeric value
+     * changed in 6.3, so we use the value detected at load time rather than a
+     * hard-coded constant. */
+    unsigned int flags = kp_foll_force | (wr ? FOLL_WRITE : 0);
+    uint64_t done = 0;
 
     if (kp_access_remote_vm) {
-        done = kp_access_remote_vm(mm, (unsigned long)addr, buf, (int)sz, flags);
-    } else if (kp_access_process_vm) {
-        struct pid *p = kp_find_get_pid(pid);
-        if (p) {
-            kpm_rcu_read_lock();
-            struct task_struct *t = kp_pid_task ? kp_pid_task(p, PIDTYPE_PID) : NULL;
-            kpm_rcu_read_unlock();
-            if (t) {
-                done = kp_access_process_vm(t, (unsigned long)addr, buf, (int)sz, flags);
-            }
-            kp_put_pid(p);
+        /* Loop: access_remote_vm can return a short count when the range
+         * crosses a hole, so keep going until the buffer is filled. */
+        while (done < sz) {
+            uint64_t remaining = sz - done;
+            int chunk = (remaining > 0x7fffffffULL) ? 0x7fffffff : (int)remaining;
+            int n = kp_access_remote_vm(mm, (unsigned long)(addr + done),
+                                        (char *)buf + done, chunk, flags);
+            if (n <= 0)
+                break;
+            done += (uint64_t)n;
         }
+    } else if (kp_access_process_vm && kp_get_pid_task) {
+        /* Fallback: access_process_vm needs a task. Take a proper reference
+         * with get_pid_task() and drop it afterwards instead of borrowing a
+         * task pointer across the (sleepable) call. */
+        struct pid *p = kp_find_get_pid(pid);
+        if (!p) { kp_mmput(mm); return -3; }
+        struct task_struct *t = kp_get_pid_task(p, PIDTYPE_PID);
+        kp_put_pid(p);
+        if (!t) { kp_mmput(mm); return -3; }
+
+        while (done < sz) {
+            uint64_t remaining = sz - done;
+            int chunk = (remaining > 0x7fffffffULL) ? 0x7fffffff : (int)remaining;
+            int n = kp_access_process_vm(t, (unsigned long)(addr + done),
+                                         (char *)buf + done, chunk, flags);
+            if (n <= 0)
+                break;
+            done += (uint64_t)n;
+        }
+        if (kp_put_task_struct)
+            kp_put_task_struct(t);
     }
 
     kp_mmput(mm);
-    if (done != (int)sz) return -5;
-    return 0;
+    return (done == sz) ? 0 : -5;
 }
 
 /* -----------------------------------------------------------------------
@@ -688,7 +707,6 @@ static uint64_t module_base(int32_t pid, const char *name)
     if (!buf) { kp_filp_close(f, 0); return 0; }
 
     loff_t pos = 0;
-    int chunk = 0;
     while (1) {
         ssize_t bytes = -1;
         if (bytes <= 0 && kp___kernel_read)
@@ -700,7 +718,6 @@ static uint64_t module_base(int32_t pid, const char *name)
         if (bytes <= 0) {
             break;
         }
-        chunk++;
         buf[bytes] = '\0';
 
         char *line = buf;
@@ -761,10 +778,56 @@ static void probe_task_comm_offset(void)
     printk(KERN_WARNING "ns_team: task_struct.comm offset probe failed\n");
 }
 
+/* Read a task's comm (16 bytes) into a NUL-terminated buffer via safe reads. */
+static int read_task_comm(struct task_struct *t, char *buf)
+{
+    if (task_comm_offset <= 0)
+        return 0;
+    for (int i = 0; i < 16; i++)
+        kp_safe_read(&buf[i], (char *)t + task_comm_offset + i, 1);
+    buf[16] = '\0';
+    return buf[0] != '\0';
+}
+
+/* Match a task comm against the requested name, including the 15-char
+ * truncation case (the kernel cuts TASK_COMM_LEN-1). */
+static int comm_matches(const char *comm, const char *target, size_t target_len)
+{
+    if (kpm_strcasestr(comm, target) || kpm_strcasestr(target, comm))
+        return 1;
+    if (target_len >= 15) {
+        for (int i = 0; i < 15 && comm[i]; i++) {
+            if (kpm_tolower_char(comm[i]) != kpm_tolower_char(target[i]))
+                return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static void cache_name(char *dst, size_t dst_size, const char *src)
+{
+    size_t i = 0;
+    for (; i < dst_size - 1 && src[i]; i++)
+        dst[i] = src[i];
+    dst[i] = '\0';
+}
+
+/* Resolve a PID from a process name.
+ *
+ * Two passes: the common case (the process comm matches) uses only the cheap
+ * per-PID comm check; the expensive per-PID VMA walk, needed when the caller
+ * passes a package name that only appears in a mapped file path, is deferred
+ * to a second pass so it no longer runs on every lookup. A one-entry cache
+ * short-circuits repeated lookups while still verifying the cached PID is
+ * alive and still matches. */
 static int32_t find_pid_by_name(const char *target_name)
 {
     if (!target_name || !target_name[0] || !kp_find_get_pid || !kp_put_pid)
         return -1;
+
+    static char    cached_name[64];
+    static int32_t cached_pid = -1;
 
     int max_pid = 65535;
     int *p_max = (int *)kallsyms_lookup_name("pid_max");
@@ -775,52 +838,67 @@ static int32_t find_pid_by_name(const char *target_name)
 
     size_t target_len = kpm_strlen(target_name);
 
-    for (int pid = 1; pid <= max_pid; pid++) {
-        struct pid *p = kp_find_get_pid(pid);
-        if (!p) continue;
+    /* Fast path: validate and reuse the cached PID. */
+    if (cached_pid > 0 && kpm_strlen(cached_name) == target_len) {
+        int same = 1;
+        for (size_t i = 0; i < target_len; i++) {
+            if (cached_name[i] != target_name[i]) { same = 0; break; }
+        }
+        if (same) {
+            struct pid *p = kp_find_get_pid(cached_pid);
+            if (p) {
+                int still = 0;
+                if (task_comm_offset > 0 && kp_pid_task) {
+                    kpm_rcu_read_lock();
+                    struct task_struct *t = kp_pid_task(p, PIDTYPE_PID);
+                    if (t) {
+                        char comm[17];
+                        if (read_task_comm(t, comm))
+                            still = comm_matches(comm, target_name, target_len);
+                    }
+                    kpm_rcu_read_unlock();
+                }
+                kp_put_pid(p);
+                if (still)
+                    return cached_pid;
+            }
+            cached_pid = -1; /* stale; fall through to a full scan */
+        }
+    }
 
-        int matched = 0;
+    /* Pass 1: cheap comm-only match. */
+    if (task_comm_offset > 0 && kp_pid_task) {
+        for (int pid = 1; pid <= max_pid; pid++) {
+            struct pid *p = kp_find_get_pid(pid);
+            if (!p) continue;
 
-        if (task_comm_offset > 0 && kp_pid_task) {
+            int matched = 0;
             kpm_rcu_read_lock();
             struct task_struct *t = kp_pid_task(p, PIDTYPE_PID);
             if (t) {
                 char comm[17];
-                for (int i = 0; i < 16; i++) {
-                    kp_safe_read(&comm[i], (char *)t + task_comm_offset + i, 1);
-                }
-                comm[16] = '\0';
-
-                if (comm[0] != '\0') {
-                    if (kpm_strcasestr(comm, target_name) || kpm_strcasestr(target_name, comm)) {
-                        matched = 1;
-                    } else if (target_len >= 15) {
-                        /* Match prefix for 15-character truncated comm */
-                        int prefix_match = 1;
-                        for (int i = 0; i < 15 && comm[i]; i++) {
-                            if (kpm_tolower_char(comm[i]) != kpm_tolower_char(target_name[i])) {
-                                prefix_match = 0;
-                                break;
-                            }
-                        }
-                        if (prefix_match) matched = 1;
-                    }
-                }
+                if (read_task_comm(t, comm))
+                    matched = comm_matches(comm, target_name, target_len);
             }
             kpm_rcu_read_unlock();
-        }
+            kp_put_pid(p);
 
-        /* Secondary check: check VMAs for package name (e.g. base.apk path) */
-        if (!matched && target_len > 3) {
-            if (module_base_vma(pid, target_name) > 0) {
-                matched = 1;
+            if (matched) {
+                cache_name(cached_name, sizeof(cached_name), target_name);
+                cached_pid = pid;
+                return pid;
             }
         }
+    }
 
-        kp_put_pid(p);
-
-        if (matched) {
-            return pid;
+    /* Pass 2: expensive VMA / package-name match, only on cache + comm miss. */
+    if (target_len > 3) {
+        for (int pid = 1; pid <= max_pid; pid++) {
+            if (module_base_vma(pid, target_name) > 0) {
+                cache_name(cached_name, sizeof(cached_name), target_name);
+                cached_pid = pid;
+                return pid;
+            }
         }
     }
 
@@ -830,6 +908,25 @@ static int32_t find_pid_by_name(const char *target_name)
 /* -----------------------------------------------------------------------
  * Dynamic touchscreen device discovery and input event injection
  * --------------------------------------------------------------------- */
+
+/* Touchscreen name heuristic.
+ * A bare "ts" substring is deliberately NOT used — it matches far too many
+ * unrelated input devices ("sensors", "rotary", ...) and would send injected
+ * events to the wrong device. Only distinctive vendor/"touch" tokens match. */
+static int is_touchscreen_name(const char *name)
+{
+    static const char *const hints[] = {
+        "touch", "synaptics", "goodix", "sec_touch", "focaltech",
+        "novatek", "himax", "elan", "atmel", "stm_ts", "fts",
+        "_ts", "ts_", "digitizer",
+    };
+    for (size_t i = 0; i < sizeof(hints) / sizeof(hints[0]); i++) {
+        if (kpm_strcasestr(name, hints[i]))
+            return 1;
+    }
+    return 0;
+}
+
 static struct input_dev *find_touchscreen_dev(const char *preferred_name)
 {
     if (p_touch_dev && (!preferred_name || !preferred_name[0]))
@@ -878,9 +975,7 @@ static struct input_dev *find_touchscreen_dev(const char *preferred_name)
                     printk(KERN_INFO "ns_team: found requested input device: '%s' at %px\n", dev_name, found);
                     break;
                 }
-                if (kpm_strcasestr(dev_name, "touch") || kpm_strcasestr(dev_name, "ts") ||
-                    kpm_strcasestr(dev_name, "synaptics") || kpm_strcasestr(dev_name, "goodix") ||
-                    kpm_strcasestr(dev_name, "fts") || kpm_strcasestr(dev_name, "sec_touch")) {
+                if (is_touchscreen_name(dev_name)) {
                     fallback_touch = (struct input_dev *)candidate_dev;
                     printk(KERN_INFO "ns_team: detected touchscreen device: '%s' at %px\n", dev_name, fallback_touch);
                 }
@@ -1164,16 +1259,6 @@ static long ns_team_init(const char *args, const char *event, void *__user rsv)
 
     RESOLVE(kp_kfree,           "kfree");
 
-    /* get_zeroed_page was renamed to get_zeroed_page_noprof in kernel 6.10+ */
-    kp_get_zeroed_page = (t_get_zeroed_page)kallsyms_lookup_name("get_zeroed_page");
-    if (!kp_get_zeroed_page) kp_get_zeroed_page = (t_get_zeroed_page)kallsyms_lookup_name("get_zeroed_page_noprof");
-    if (!kp_get_zeroed_page) { printk(KERN_ERR "ns_team: missing: get_zeroed_page / get_zeroed_page_noprof\n"); missing++; }
-
-    /* free_pages was renamed to free_pages_noprof in kernel 6.10+ */
-    kp_free_pages = (t_free_pages)kallsyms_lookup_name("free_pages");
-    if (!kp_free_pages) kp_free_pages = (t_free_pages)kallsyms_lookup_name("free_pages_noprof");
-    if (!kp_free_pages) { printk(KERN_ERR "ns_team: missing: free_pages / free_pages_noprof\n"); missing++; }
-
     kp_snprintf = (t_snprintf)kallsyms_lookup_name("snprintf");
     kp_filp_open = (t_filp_open)kallsyms_lookup_name("filp_open");
     kp_kernel_read = (t_kernel_read)kallsyms_lookup_name("kernel_read");
@@ -1185,10 +1270,12 @@ static long ns_team_init(const char *args, const char *event, void *__user rsv)
 
     /* copy_from_user: prefer __arch_copy_from_user (raw LDTR copier).
      * On GKI2 stock 5.10, _copy_from_user is broken (copies only first
-     * few bytes but returns 0). __arch_copy uses LDTR which bypasses PAN. */
+     * few bytes but returns 0). __arch_copy uses LDTR, which requires PAN to
+     * be cleared around the call — record that so the wrapper does it. */
     kp_raw_copy_from_user = (t_copy_from_user)kallsyms_lookup_name("__arch_copy_from_user");
     if (kp_raw_copy_from_user) {
-        printk(KERN_INFO "ns_team: using __arch_copy_from_user\n");
+        kp_arch_copy_from = 1;
+        printk(KERN_INFO "ns_team: using __arch_copy_from_user (PAN toggled)\n");
     } else {
         kp_raw_copy_from_user = (t_copy_from_user)kallsyms_lookup_name("_copy_from_user");
         if (kp_raw_copy_from_user)
@@ -1196,7 +1283,10 @@ static long ns_team_init(const char *args, const char *event, void *__user rsv)
     }
 
     kp_raw_copy_to_user = (t_copy_from_user)kallsyms_lookup_name("__arch_copy_to_user");
-    if (!kp_raw_copy_to_user) {
+    if (kp_raw_copy_to_user) {
+        kp_arch_copy_to = 1;
+        printk(KERN_INFO "ns_team: using __arch_copy_to_user (PAN toggled)\n");
+    } else {
         kp_raw_copy_to_user = (t_copy_from_user)kallsyms_lookup_name("_copy_to_user");
     }
 
@@ -1309,6 +1399,7 @@ static long ns_team_init(const char *args, const char *event, void *__user rsv)
             fops_ioctl_offset = (open_off <= 0x60)
                                 ? open_off - 0x18
                                 : open_off - 0x20;
+            fops_probed = 1;
         } else {
             fops_ioctl_offset = 0x48; /* safe fallback for 4.14 */
             printk(KERN_WARNING "ns_team: fops probe failed, defaulting ioctl=0x48\n");
@@ -1332,25 +1423,23 @@ static long ns_team_init(const char *args, const char *event, void *__user rsv)
     char *p2 = (char *)p_ns_team_dev;
     for (int i = 0; i < 4096; i++) { p1[i] = 0; p2[i] = 0; }
 
-    /* Write ioctl function pointers at ALL possible offsets.
-     * On different kernels, unlocked_ioctl can be at 0x38..0x58.
-     * compat_ioctl is always unlocked_ioctl + 0x08.
-     * Writing to multiple offsets is safe because unused slots (like poll,
-     * iterate_shared) being set to ns_team_ioctl just means those syscalls
-     * call our handler which returns -EINVAL for unknown cmds.
-     * Known layouts (arm64):
-     *   4.9-4.14:  ioctl=0x38 (no iopoll, iterate_shared before 4.7 varies)
-     *   4.19-5.0:  ioctl=0x48 (has iopoll but no iterate, or iterate at 0x38)
-     *   5.1-5.8:   ioctl=0x50 (iterate + iterate_shared added)
-     *   5.10-6.x:  ioctl=0x48 or 0x50 (depends on CONFIG_ITERATE_DIR etc.) */
-    int ioctl_offsets[] = { 0x38, 0x40, 0x48, 0x50, 0x58 };
-    int n_offsets = sizeof(ioctl_offsets) / sizeof(ioctl_offsets[0]);
-    for (int i = 0; i < n_offsets; i++) {
-        int off = ioctl_offsets[i];
-        *(uint64_t *)(p1 + off) = (uint64_t)ns_team_ioctl;
+    /* Install the handler only in the probed unlocked_ioctl slot plus its
+     * compat_ioctl sibling at +0x08. The previous code wrote the handler into
+     * every slot from 0x38 to 0x58, which clobbered read/write/iterate_shared/
+     * mmap — any read()/write() on the device then landed in our handler with
+     * mismatched arguments. Only if the layout probe failed do we fall back to
+     * the known arm64 candidate offsets. */
+    if (fops_probed) {
+        *(uint64_t *)(p1 + fops_ioctl_offset)  = (uint64_t)ns_team_ioctl;
+        *(uint64_t *)(p1 + fops_compat_offset) = (uint64_t)ns_team_ioctl;
+    } else {
+        int fallback_offsets[] = { 0x40, 0x48, 0x50, 0x58 };
+        int n_fallback = sizeof(fallback_offsets) / sizeof(fallback_offsets[0]);
+        for (int i = 0; i < n_fallback; i++)
+            *(uint64_t *)(p1 + fallback_offsets[i]) = (uint64_t)ns_team_ioctl;
     }
-    printk(KERN_INFO "ns_team: ioctl handler installed at offsets 0x38-0x58 (probed=0x%x)\n",
-           fops_ioctl_offset);
+    printk(KERN_INFO "ns_team: ioctl handler installed at 0x%x (compat 0x%x, probed=%d)\n",
+           fops_ioctl_offset, fops_compat_offset, fops_probed);
 
     /* Set up miscdevice */
     p_ns_team_dev->minor = MISC_DYNAMIC_MINOR;
