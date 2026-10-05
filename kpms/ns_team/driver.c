@@ -1226,17 +1226,27 @@ static struct kpm_miscdevice      *p_ns_team_dev;
  * Returns the byte offset of the slot, or -1 if it could not be determined. */
 static int probe_ioctl_offset_from_known_fops(void)
 {
-    static const char *const fops_names[]  = { "ptmx_fops", "def_blk_fops" };
-    static const char *const ioctl_names[] = { "tty_ioctl", "blkdev_ioctl" };
+    static const char *const fops_names[] = { "ptmx_fops", "def_blk_fops" };
+    /* Kernels built with CFI and canonical jump tables store the
+     * "<fn>.cfi_jt" trampoline address in every function-pointer field, so
+     * try both the plain symbol and its .cfi_jt alias. */
+    static const char *const ioctl_names[][2] = {
+        { "tty_ioctl",    "tty_ioctl.cfi_jt"    },
+        { "blkdev_ioctl", "blkdev_ioctl.cfi_jt" },
+    };
 
     for (int f = 0; f < 2; f++) {
         uint64_t *fops = (uint64_t *)kallsyms_lookup_name(fops_names[f]);
-        uint64_t  fn   = kallsyms_lookup_name(ioctl_names[f]);
-        if (!fops || !fn)
+        if (!fops)
             continue;
-        for (int slot = 2; slot < 40; slot++) {   /* skip owner/llseek */
-            if (fops[slot] == fn)
-                return slot * 8;
+        for (int c = 0; c < 2; c++) {
+            uint64_t fn = kallsyms_lookup_name(ioctl_names[f][c]);
+            if (!fn)
+                continue;
+            for (int slot = 2; slot < 40; slot++) {   /* skip owner/llseek */
+                if (fops[slot] == fn)
+                    return slot * 8;
+            }
         }
     }
     return -1;
